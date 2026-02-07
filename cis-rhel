@@ -353,3 +353,6 @@ sudo chmod +x /opt/scripts/user.sh || true
 sudo /opt/scripts/user.sh || true
 
 echo "CIS HARDENING COMPLETE"
+
+
+curl -I https://pdsatcapprprd01.corp.advancestores.com/pulp/content/AAP/dev/ccv_aap_rhel11o/content/dist/rhel10/10.0/x86_64/appstream/os/repodata/repomd.xml
