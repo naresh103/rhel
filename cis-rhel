@@ -1,4 +1,23 @@
-  # Upload CIS tarball (downloaded into repo/packer/cis/ by GitHub Actions)
+
+find /var/lib/pulp -type f -name repomd.xml 2>/dev/null | grep -E 'rhel10|rhel110' | grep -E 'baseos|appstream'
+
+
+
+curl -k -I -v https://localhost/pulp/content/AAP/dev/ccv_aap_rhel110/content/dist/rhel10/10/x86_64/appstream/os/repodata/repomd.xml
+curl -k -I -v https://localhost/pulp/content/AAP/dev/ccv_aap_rhel110/content/dist/rhel110/10.0/x86_64/appstream/os/repodata/repomd.xml   # test wrong path
+
+
+
+hammer capsule info --name pdsatcapprprd01.corp.advancestores.com   # or capsule ID
+hammer capsule content sync-overview --id <capsule_id>
+
+
+
+
+
+
+
+# Upload CIS tarball (downloaded into repo/packer/cis/ by GitHub Actions)
   provisioner "file" {
     source      = "${path.root}/cis/CIS_RHEL10.tar.gz"
     destination = "/tmp/CIS_RHEL10.tar.gz"
