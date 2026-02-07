@@ -329,3 +329,27 @@ build {
     ]
   }
 }
+
+
+
+set -euo pipefail
+
+echo "Installing ansible..."
+sudo dnf -y install ansible-core tar python3 || true
+if ! command -v ansible-playbook >/dev/null; then
+  sudo python3 -m pip install ansible
+fi
+
+echo "Extracting CIS..."
+sudo mkdir -p /opt/cis/extracted
+sudo tar -xf /opt/cis/RHEL10-CIS.tar -C /opt/cis/extracted
+
+echo "Running CIS..."
+cd /opt/cis/extracted
+sudo ansible-playbook -i "localhost," -c local site.yml
+
+echo "Running user script..."
+sudo chmod +x /opt/scripts/user.sh || true
+sudo /opt/scripts/user.sh || true
+
+echo "CIS HARDENING COMPLETE"
