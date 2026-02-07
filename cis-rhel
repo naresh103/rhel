@@ -1,0 +1,331 @@
+  # Upload CIS tarball (downloaded into repo/packer/cis/ by GitHub Actions)
+  provisioner "file" {
+    source      = "${path.root}/cis/CIS_RHEL10.tar.gz"
+    destination = "/tmp/CIS_RHEL10.tar.gz"
+  }
+
+  # Upload your custom script
+  provisioner "file" {
+    source      = "${path.root}/scripts/user_post.sh"
+    destination = "/tmp/user_post.sh"
+  }
+
+
+
+
+packer {
+  required_plugins {
+    googlecompute = {
+      source  = "github.com/hashicorp/googlecompute"
+      version = ">= 1.1.0"
+    }
+  }
+}
+
+########################
+# Variables
+########################
+variable "project_id" { type = string }
+variable "zone"       { type = string  default = "us-central1-a" }
+
+# RHEL image family/project in GCP can differ depending on how you source RHEL.
+# Make these variables so you can swap easily.
+variable "source_image_family"     { type = string }
+variable "source_image_project_id" { type = string }
+
+variable "image_name" {
+  type    = string
+  default = "rhel10-cis-{{timestamp}}"
+}
+
+variable "image_family" {
+  type    = string
+  default = "rhel10-cis"
+}
+
+variable "machine_type" { type = string default = "e2-standard-2" }
+variable "disk_size_gb" { type = number default = 20 }
+
+# Most RHEL images on GCP use "cloud-user". Some may use different users.
+variable "ssh_username" { type = string default = "cloud-user" }
+
+# Where CIS is extracted on the VM
+variable "cis_extract_dir" {
+  type    = string
+  default = "/opt/cis"
+}
+
+# IMPORTANT: set this to the playbook path inside your CIS tarball
+# Example values you might use:
+#   "site.yml"
+#   "rhel10-cis.yml"
+#   "playbooks/site.yml"
+variable "cis_playbook_relpath" {
+  type = string
+}
+
+# Optional: extra vars/tags for CIS run
+variable "cis_extra_vars" {
+  type    = string
+  default = ""
+}
+
+variable "cis_tags" {
+  type    = string
+  default = ""
+}
+
+variable "cis_skip_tags" {
+  type    = string
+  default = ""
+}
+
+########################
+# Source (GCP builder)
+########################
+source "googlecompute" "rhel10" {
+  project_id              = var.project_id
+  zone                    = var.zone
+  machine_type            = var.machine_type
+  disk_size               = var.disk_size_gb
+
+  source_image_family     = var.source_image_family
+  source_image_project_id = var.source_image_project_id
+
+  image_name              = var.image_name
+  image_family            = var.image_family
+
+  ssh_username            = var.ssh_username
+
+  # Optional hardening knobs
+  # omit_external_ip = true  # only if your network supports it (private access / NAT)
+  # use_internal_ip  = true
+}
+
+########################
+# Build
+########################
+build {
+  sources = ["source.googlecompute.rhel10"]
+
+  # Upload CIS tarball (downloaded into repo/packer/cis/ by GitHub Actions)
+  provisioner "file" {
+    source      = "${path.root}/cis/CIS_RHEL10.tar.gz"
+    destination = "/tmp/CIS_RHEL10.tar.gz"
+  }
+
+  # Upload your custom script
+  provisioner "file" {
+    source      = "${path.root}/scripts/user_post.sh"
+    destination = "/tmp/user_post.sh"
+  }
+
+  # Install prerequisites + extract CIS bundle
+  provisioner "shell" {
+    inline = [
+      "set -euo pipefail",
+
+      "sudo chmod +x /tmp/user_post.sh",
+
+      # Base packages
+      "sudo dnf -y update",
+      "sudo dnf -y install tar gzip python3",
+
+      # Install Ansible (choose one method depending on your repo policy)
+      # Option A: ansible-core via dnf (preferred if available in your repos)
+      "sudo dnf -y install ansible-core || true",
+
+      # Option B: fallback via pip if ansible-core package isn't available
+      "if ! command -v ansible-playbook >/dev/null 2>&1; then sudo python3 -m pip install --upgrade pip && sudo python3 -m pip install ansible; fi",
+
+      # Extract CIS
+      "sudo mkdir -p ${var.cis_extract_dir}",
+      "sudo tar -xzf /tmp/CIS_RHEL10.tar.gz -C ${var.cis_extract_dir}",
+      "sudo chown -R root:root ${var.cis_extract_dir}",
+      "sudo chmod -R go-rwx ${var.cis_extract_dir}",
+    ]
+  }
+
+  # Run CIS hardening via Ansible on localhost
+  # (Ansible runs on the VM; playbook/roles exist on the VM after extraction.)
+  provisioner "shell" {
+    inline = [
+      "set -euo pipefail",
+
+      "PLAYBOOK=\"${var.cis_extract_dir}/${var.cis_playbook_relpath}\"",
+      "if [ ! -f \"$PLAYBOOK\" ]; then echo \"ERROR: CIS playbook not found at $PLAYBOOK\"; echo \"Top-level contents:\"; sudo ls -la ${var.cis_extract_dir}; exit 2; fi",
+
+      # Build optional args
+      "EXTRA_VARS='${var.cis_extra_vars}'",
+      "TAGS='${var.cis_tags}'",
+      "SKIP_TAGS='${var.cis_skip_tags}'",
+
+      "ANSIBLE_ARGS=''",
+      "if [ -n \"$EXTRA_VARS\" ]; then ANSIBLE_ARGS=\"$ANSIBLE_ARGS -e $EXTRA_VARS\"; fi",
+      "if [ -n \"$TAGS\" ]; then ANSIBLE_ARGS=\"$ANSIBLE_ARGS --tags $TAGS\"; fi",
+      "if [ -n \"$SKIP_TAGS\" ]; then ANSIBLE_ARGS=\"$ANSIBLE_ARGS --skip-tags $SKIP_TAGS\"; fi",
+
+      # Run
+      "sudo ansible-playbook -i 'localhost,' -c local \"$PLAYBOOK\" $ANSIBLE_ARGS",
+    ]
+  }
+
+  # Run your own post-hardening script (or add another script earlier if you want)
+  provisioner "shell" {
+    inline = [
+      "set -euo pipefail",
+      "sudo /tmp/user_post.sh"
+    ]
+  }
+
+  # Cleanup for golden image
+  provisioner "shell" {
+    inline = [
+      "set -euo pipefail",
+
+      "sudo rm -f /tmp/CIS_RHEL10.tar.gz /tmp/user_post.sh",
+
+      "sudo dnf -y clean all || true",
+      "sudo rm -rf /var/cache/dnf || true",
+
+      # Optional: reset machine-id for templated clones
+      "sudo truncate -s 0 /etc/machine-id || true",
+      "sudo rm -f /var/lib/dbus/machine-id || true",
+    ]
+  }
+}
+
+
+
+
+
+####################
+
+
+name: Build RHEL10 CIS Image (GCP)
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  id-token: write   # REQUIRED for Workload Identity Federation
+
+jobs:
+  packer:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud (WIF)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_SA_EMAIL }}
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Install Packer
+        uses: hashicorp/setup-packer@v3
+        with:
+          version: "latest"
+
+      - name: Download CIS tarball from GCS
+        working-directory: packer
+        env:
+          CIS_GCS_URI: ${{ secrets.CIS_GCS_URI }} # e.g. gs://my-bucket/cis/CIS_RHEL10.tar.gz
+        run: |
+          mkdir -p cis
+          gcloud storage cp "${CIS_GCS_URI}" cis/CIS_RHEL10.tar.gz
+          ls -lh cis/
+
+      - name: Packer init
+        working-directory: packer
+        run: packer init .
+
+      - name: Packer validate
+        working-directory: packer
+        run: |
+          packer validate \
+            -var "project_id=${{ secrets.GCP_PROJECT_ID }}" \
+            -var "zone=${{ secrets.GCP_ZONE }}" \
+            -var "source_image_family=${{ secrets.GCP_RHEL10_FAMILY }}" \
+            -var "source_image_project_id=${{ secrets.GCP_RHEL_IMAGE_PROJECT }}" \
+            -var "cis_playbook_relpath=${{ secrets.CIS_PLAYBOOK_RELPATH }}" \
+            rhel10-gcp.pkr.hcl
+
+      - name: Packer build
+        working-directory: packer
+        run: |
+          packer build \
+            -var "project_id=${{ secrets.GCP_PROJECT_ID }}" \
+            -var "zone=${{ secrets.GCP_ZONE }}" \
+            -var "source_image_family=${{ secrets.GCP_RHEL10_FAMILY }}" \
+            -var "source_image_project_id=${{ secrets.GCP_RHEL_IMAGE_PROJECT }}" \
+            -var "cis_playbook_relpath=${{ secrets.CIS_PLAYBOOK_RELPATH }}" \
+            rhel10-gcp.pkr.hcl
+
+
+
+
+
+
+
+########################################
+
+
+build {
+  sources = ["source.<your-builder>.<your-source>"]
+
+  # 1) Upload CIS tarball
+  provisioner "file" {
+    source      = "${path.root}/cis/CIS_RHEL10.tar.gz"
+    destination = "/tmp/CIS_RHEL10.tar.gz"
+  }
+
+  # 2) Install prereqs + extract + run the hardening playbook
+  provisioner "shell" {
+    inline = [
+      "set -euo pipefail",
+
+      # prereqs (adjust for your RHEL subscription/repos)
+      "sudo dnf -y update",
+      "sudo dnf -y install python3 python3-pip tar gzip",
+      # ansible-core is usually easiest on RHEL10
+      "sudo dnf -y install ansible-core",
+
+      # extract
+      "sudo mkdir -p /opt/cis",
+      "sudo tar -xzf /tmp/CIS_RHEL10.tar.gz -C /opt/cis",
+
+      # OPTIONAL: if your tar expands into a single top dir, normalize path
+      # "ls -la /opt/cis",
+
+      # run (update these paths to match your tarball structure)
+      # Example assumes: /opt/cis/site.yml and roles/ under /opt/cis/roles
+      "cd /opt/cis",
+      "sudo ansible-playbook -i 'localhost,' -c local site.yml",
+
+      # if the playbook needs variables for level1/level2 etc:
+      # "sudo ansible-playbook -i 'localhost,' -c local site.yml -e 'cis_level=level1-server'",
+
+      # cleanup
+      "sudo rm -f /tmp/CIS_RHEL10.tar.gz",
+    ]
+  }
+
+  # 3) Final cleanup (optional but good practice for golden images)
+  provisioner "shell" {
+    inline = [
+      "set -euo pipefail",
+      "sudo dnf -y clean all",
+      "sudo rm -rf /var/cache/dnf",
+      # Optional: reset machine-id for templated clones (depends on your platform)
+      "sudo truncate -s 0 /etc/machine-id || true",
+      "sudo rm -f /var/lib/dbus/machine-id || true",
+    ]
+  }
+}
